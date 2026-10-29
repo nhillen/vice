@@ -758,6 +758,8 @@ typedef struct rr_callbacks_s {
     uint64_t (*now)(void);
     uint32_t (*bank)(void);
     uint32_t (*pending)(void);
+    void (*clk_read)(uint32_t cycles);
+    void (*set_last_opcode)(uint32_t info);
 } rr_callbacks_t;
 
 typedef int (*rr_dispatch_fn)(rr_regs_t *regs, const rr_callbacks_t *cb);
@@ -775,6 +777,11 @@ static uint8_t rr_cb_load(uint16_t addr) { return LOAD(addr); }
 static void rr_cb_store(uint16_t addr, uint8_t value) { STORE(addr, value); }
 static uint8_t rr_cb_peek(uint16_t addr) { return mem_bank_peek(0, addr, NULL); }
 static void rr_cb_clk(uint32_t cycles) { while (cycles--) { CLK_INC(); } }
+/* A read cycle: the VIC-II may hold the CPU first, as LOAD does. */
+static void rr_cb_clk_read(uint32_t cycles) { while (cycles--) { check_ba(); CLK_INC(); } }
+/* What the last translated instruction was: opcode and the interrupt-delay
+   bits, which interrupt_check_irq_delay() and friends read. */
+static void rr_cb_set_last_opcode(uint32_t info) { last_opcode_info = info; }
 static uint64_t rr_cb_now(void) { return maincpu_clk; }
 static uint32_t rr_cb_bank(void) { return (uint32_t)mem_get_current_bank_config(); }
 static uint32_t rr_cb_pending(void) { return (uint32_t)(maincpu_int_status->global_pending_int & ~IK_MONITOR); }
@@ -792,7 +799,8 @@ static int rr_must_interpret(unsigned int pending, int i_flag)
 }
 
 static const rr_callbacks_t rr_callbacks = {
-    rr_cb_load, rr_cb_store, rr_cb_peek, rr_cb_clk, rr_cb_now, rr_cb_bank, rr_cb_pending
+    rr_cb_load, rr_cb_store, rr_cb_peek, rr_cb_clk, rr_cb_now, rr_cb_bank, rr_cb_pending,
+    rr_cb_clk_read, rr_cb_set_last_opcode
 };
 
 static rr_dispatch_fn rr_dispatch = NULL;
