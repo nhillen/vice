@@ -728,6 +728,92 @@ void maincpu_resync_limits(void)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* RetroRecomp dispatch hook (fork branch rr-integration).
+
+   When built with -DRR_HOOK and the environment variable RR_BLOCKS_DLL names
+   a library exporting `rr_dispatch`, every instruction boundary at which no
+   interrupt, reset, trap or DMA is pending offers the current PC and
+   registers to that library. If it ran a translated block it returns > 0 and
+   the updated registers; otherwise the interpreter fetches as usual.
+
+   The library reaches the machine only through the callbacks below, which
+   use the core's own LOAD (with BA checks), STORE and CLK_INC, so memory
+   side effects, cycle stealing, alarms and the VIC-II advance as they would
+   for interpreted code. Cycles are charged per instruction, after its memory
+   accesses; per-access timing inside an instruction is not modelled yet. */
+
+#ifdef RR_HOOK
+
+typedef struct rr_regs_s {
+    uint16_t pc;
+    uint8_t a, x, y, sp, p;
+} rr_regs_t;
+
+typedef struct rr_callbacks_s {
+    uint8_t (*load)(uint16_t addr);
+    void (*store)(uint16_t addr, uint8_t value);
+    uint8_t (*peek)(uint16_t addr);
+    void (*clk)(uint32_t cycles);
+    uint64_t (*now)(void);
+    uint32_t (*bank)(void);
+} rr_callbacks_t;
+
+typedef int (*rr_dispatch_fn)(rr_regs_t *regs, const rr_callbacks_t *cb);
+
+#ifdef _WIN32
+/* Declared here rather than via windows.h, whose macros collide with the
+   core's. */
+__declspec(dllimport) void *__stdcall LoadLibraryA(const char *name);
+__declspec(dllimport) void *__stdcall GetProcAddress(void *module, const char *name);
+#else
+#include <dlfcn.h>
+#endif
+
+static uint8_t rr_cb_load(uint16_t addr) { return LOAD(addr); }
+static void rr_cb_store(uint16_t addr, uint8_t value) { STORE(addr, value); }
+static uint8_t rr_cb_peek(uint16_t addr) { return mem_bank_peek(0, addr, NULL); }
+static void rr_cb_clk(uint32_t cycles) { while (cycles--) { CLK_INC(); } }
+static uint64_t rr_cb_now(void) { return maincpu_clk; }
+static uint32_t rr_cb_bank(void) { return (uint32_t)mem_get_current_bank_config(); }
+
+static const rr_callbacks_t rr_callbacks = {
+    rr_cb_load, rr_cb_store, rr_cb_peek, rr_cb_clk, rr_cb_now, rr_cb_bank
+};
+
+static rr_dispatch_fn rr_dispatch = NULL;
+static int rr_state = 0; /* 0 not tried, 1 active, -1 absent */
+
+static int rr_hook_enabled(void)
+{
+    if (rr_state == 0) {
+        const char *path = getenv("RR_BLOCKS_DLL");
+        rr_state = -1;
+        if (path != NULL && *path != 0) {
+#ifdef _WIN32
+            void *module = LoadLibraryA(path);
+            if (module != NULL) {
+                rr_dispatch = (rr_dispatch_fn)GetProcAddress(module, "rr_dispatch");
+            }
+#else
+            void *module = dlopen(path, RTLD_NOW);
+            if (module != NULL) {
+                rr_dispatch = (rr_dispatch_fn)dlsym(module, "rr_dispatch");
+            }
+#endif
+            if (rr_dispatch != NULL) {
+                rr_state = 1;
+                log_message(maincpu_log, "RetroRecomp: dispatch hook active, blocks from %s", path);
+            } else {
+                log_error(maincpu_log, "RetroRecomp: could not load rr_dispatch from %s", path);
+            }
+        }
+    }
+    return rr_state == 1;
+}
+
+#endif /* RR_HOOK */
+
 void maincpu_mainloop(void)
 {
 #define ORIGIN_MEMSPACE (e_comp_space)
@@ -805,6 +891,10 @@ void maincpu_mainloop(void)
 #define ROM_TRAP_ALLOWED() mem_rom_trap_allowed((uint16_t)reg_pc)
 
 #define GLOBAL_REGS maincpu_regs
+
+#ifdef RR_HOOK
+#define DISPATCH_HOOK()                                                             if (rr_hook_enabled() && !CPU_IS_JAMMED                                             && (CPU_INT_STATUS->global_pending_int & ~IK_MONITOR) == IK_NONE) {             rr_regs_t rr_r;                                                                 rr_r.pc = (uint16_t)reg_pc;                                                     rr_r.a = reg_a;                                                                 rr_r.x = reg_x;                                                                 rr_r.y = reg_y;                                                                 rr_r.sp = reg_sp;                                                               rr_r.p = (uint8_t)LOCAL_STATUS();                                               if (rr_dispatch(&rr_r, &rr_callbacks) > 0) {                                        reg_a = rr_r.a;                                                                 reg_x = rr_r.x;                                                                 reg_y = rr_r.y;                                                                 reg_sp = rr_r.sp;                                                               LOCAL_SET_STATUS(rr_r.p);                                                       bank_start = bank_limit = 0;                                                    JUMP(rr_r.pc);                                                                  continue;                                                                   }                                                                           }
+#endif
 
 #include "6510dtvcore.c"
 

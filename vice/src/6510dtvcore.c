@@ -1773,6 +1773,12 @@ static const uint8_t fetch_tab[] = {
 
     {
         opcode_t opcode;
+#ifdef DISPATCH_HOOK
+        /* RetroRecomp: may run a translated block and `continue` the main
+           loop; defined by the CPU file. Interrupts and alarms for this
+           boundary have been handled above. */
+        DISPATCH_HOOK();
+#endif
 #if defined (DEBUG) || defined (FEATURE_CPUMEMHISTORY)
         debug_clk = maincpu_clk;
 #endif
