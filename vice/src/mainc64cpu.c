@@ -757,6 +757,7 @@ typedef struct rr_callbacks_s {
     void (*clk)(uint32_t cycles);
     uint64_t (*now)(void);
     uint32_t (*bank)(void);
+    uint32_t (*pending)(void);
 } rr_callbacks_t;
 
 typedef int (*rr_dispatch_fn)(rr_regs_t *regs, const rr_callbacks_t *cb);
@@ -776,9 +777,22 @@ static uint8_t rr_cb_peek(uint16_t addr) { return mem_bank_peek(0, addr, NULL); 
 static void rr_cb_clk(uint32_t cycles) { while (cycles--) { CLK_INC(); } }
 static uint64_t rr_cb_now(void) { return maincpu_clk; }
 static uint32_t rr_cb_bank(void) { return (uint32_t)mem_get_current_bank_config(); }
+static uint32_t rr_cb_pending(void) { return (uint32_t)(maincpu_int_status->global_pending_int & ~IK_MONITOR); }
+
+/* Whether the interpreter must act at this boundary: NMI, reset, trap or
+   DMA always; an IRQ only when the I flag is clear. A masked IRQ (for
+   example the KERNAL's CIA timer under SEI) must not keep translated code
+   from running. DO_INTERRUPT has already handled this boundary when the
+   hook runs; this rule only decides whether to leave it to the
+   interpreter. */
+static int rr_must_interpret(unsigned int pending, int i_flag)
+{
+    return (pending & (IK_NMI | IK_RESET | IK_TRAP | IK_DMA)) != 0
+        || ((pending & (IK_IRQ | IK_IRQPEND)) != 0 && !i_flag);
+}
 
 static const rr_callbacks_t rr_callbacks = {
-    rr_cb_load, rr_cb_store, rr_cb_peek, rr_cb_clk, rr_cb_now, rr_cb_bank
+    rr_cb_load, rr_cb_store, rr_cb_peek, rr_cb_clk, rr_cb_now, rr_cb_bank, rr_cb_pending
 };
 
 static rr_dispatch_fn rr_dispatch = NULL;
@@ -893,7 +907,28 @@ void maincpu_mainloop(void)
 #define GLOBAL_REGS maincpu_regs
 
 #ifdef RR_HOOK
-#define DISPATCH_HOOK()                                                             if (rr_hook_enabled() && !CPU_IS_JAMMED                                             && (CPU_INT_STATUS->global_pending_int & ~IK_MONITOR) == IK_NONE) {             rr_regs_t rr_r;                                                                 rr_r.pc = (uint16_t)reg_pc;                                                     rr_r.a = reg_a;                                                                 rr_r.x = reg_x;                                                                 rr_r.y = reg_y;                                                                 rr_r.sp = reg_sp;                                                               rr_r.p = (uint8_t)LOCAL_STATUS();                                               if (rr_dispatch(&rr_r, &rr_callbacks) > 0) {                                        reg_a = rr_r.a;                                                                 reg_x = rr_r.x;                                                                 reg_y = rr_r.y;                                                                 reg_sp = rr_r.sp;                                                               LOCAL_SET_STATUS(rr_r.p);                                                       bank_start = bank_limit = 0;                                                    JUMP(rr_r.pc);                                                                  continue;                                                                   }                                                                           }
+#define DISPATCH_HOOK()                                                         \
+    if (rr_hook_enabled() && !CPU_IS_JAMMED                                     \
+        && !rr_must_interpret(CPU_INT_STATUS->global_pending_int & ~IK_MONITOR, \
+                              LOCAL_INTERRUPT())) {                             \
+        rr_regs_t rr_r;                                                         \
+        rr_r.pc = (uint16_t)reg_pc;                                             \
+        rr_r.a = reg_a;                                                         \
+        rr_r.x = reg_x;                                                         \
+        rr_r.y = reg_y;                                                         \
+        rr_r.sp = reg_sp;                                                       \
+        rr_r.p = (uint8_t)LOCAL_STATUS();                                       \
+        if (rr_dispatch(&rr_r, &rr_callbacks) > 0) {                            \
+            reg_a = rr_r.a;                                                     \
+            reg_x = rr_r.x;                                                     \
+            reg_y = rr_r.y;                                                     \
+            reg_sp = rr_r.sp;                                                   \
+            LOCAL_SET_STATUS(rr_r.p);                                           \
+            bank_start = bank_limit = 0;                                        \
+            JUMP(rr_r.pc);                                                      \
+            continue;                                                           \
+        }                                                                       \
+    }
 #endif
 
 #include "6510dtvcore.c"
