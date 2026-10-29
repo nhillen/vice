@@ -766,9 +766,11 @@ typedef int (*rr_dispatch_fn)(rr_regs_t *regs, const rr_callbacks_t *cb);
 
 #ifdef _WIN32
 /* Declared here rather than via windows.h, whose macros collide with the
-   core's. */
+   core's, unless a UI header (SDL2) has already included windows.h. */
+#ifndef _WINDOWS_
 __declspec(dllimport) void *__stdcall LoadLibraryA(const char *name);
 __declspec(dllimport) void *__stdcall GetProcAddress(void *module, const char *name);
+#endif
 #else
 #include <dlfcn.h>
 #endif
@@ -813,9 +815,9 @@ static int rr_hook_enabled(void)
         rr_state = -1;
         if (path != NULL && *path != 0) {
 #ifdef _WIN32
-            void *module = LoadLibraryA(path);
+            void *module = (void *)LoadLibraryA(path);
             if (module != NULL) {
-                rr_dispatch = (rr_dispatch_fn)GetProcAddress(module, "rr_dispatch");
+                rr_dispatch = (rr_dispatch_fn)(void *)GetProcAddress(module, "rr_dispatch");
             }
 #else
             void *module = dlopen(path, RTLD_NOW);
