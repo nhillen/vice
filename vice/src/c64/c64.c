@@ -1231,7 +1231,9 @@ void machine_specific_shutdown(void)
 #ifdef RR_HOOK
     {
         extern void rr_event_record_flush(void);
+        extern void rr_hook_shutdown(void);
         rr_event_record_flush();
+        rr_hook_shutdown();
     }
 #endif
     tape_image_detach_internal(TAPEPORT_PORT_1 + 1);

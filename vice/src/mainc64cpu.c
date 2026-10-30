@@ -811,7 +811,18 @@ static const rr_callbacks_t rr_callbacks = {
 };
 
 static rr_dispatch_fn rr_dispatch = NULL;
+typedef void (*rr_shutdown_fn)(void);
+static rr_shutdown_fn rr_shutdown = NULL;
 static int rr_state = 0; /* 0 not tried, 1 active, -1 absent */
+
+/* Called at machine shutdown: the DLL writes its final statistics and
+   observations, so nothing is lost when a window is closed. */
+void rr_hook_shutdown(void)
+{
+    if (rr_shutdown != NULL) {
+        rr_shutdown();
+    }
+}
 
 static int rr_hook_enabled(void)
 {
@@ -823,11 +834,13 @@ static int rr_hook_enabled(void)
             void *module = (void *)LoadLibraryA(path);
             if (module != NULL) {
                 rr_dispatch = (rr_dispatch_fn)(void *)GetProcAddress(module, "rr_dispatch");
+                rr_shutdown = (rr_shutdown_fn)(void *)GetProcAddress(module, "rr_shutdown");
             }
 #else
             void *module = dlopen(path, RTLD_NOW);
             if (module != NULL) {
                 rr_dispatch = (rr_dispatch_fn)dlsym(module, "rr_dispatch");
+                rr_shutdown = (rr_shutdown_fn)dlsym(module, "rr_shutdown");
             }
 #endif
             if (rr_dispatch != NULL) {
