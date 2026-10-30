@@ -765,6 +765,12 @@ typedef struct rr_callbacks_s {
     uint32_t (*pending)(void);
     void (*clk_read)(uint32_t cycles);
     void (*set_last_opcode)(uint32_t info);
+    /* What an I/O write's bus cycle does besides storing: VICE handles the
+       pending alarms (machine_handle_pending_alarms, as sid_store_chip
+       does). For a write a module swallows, so interrupts are raised on
+       the same cycle as when the chip gets the write. Appended last, so a
+       DLL built against the shorter struct still works. */
+    void (*alarms)(uint32_t write_cycles);
 } rr_callbacks_t;
 
 typedef int (*rr_dispatch_fn)(rr_regs_t *regs, const rr_callbacks_t *cb);
@@ -789,6 +795,7 @@ static void rr_cb_clk_read(uint32_t cycles) { while (cycles--) { check_ba(); CLK
 /* What the last translated instruction was: opcode and the interrupt-delay
    bits, which interrupt_check_irq_delay() and friends read. */
 static void rr_cb_set_last_opcode(uint32_t info) { last_opcode_info = info; }
+static void rr_cb_alarms(uint32_t write_cycles) { machine_handle_pending_alarms((CLOCK)write_cycles); }
 static uint64_t rr_cb_now(void) { return maincpu_clk; }
 static uint32_t rr_cb_bank(void) { return (uint32_t)mem_get_current_bank_config(); }
 static uint32_t rr_cb_pending(void) { return (uint32_t)(maincpu_int_status->global_pending_int & ~IK_MONITOR); }
@@ -807,13 +814,19 @@ static int rr_must_interpret(unsigned int pending, int i_flag)
 
 static const rr_callbacks_t rr_callbacks = {
     rr_cb_load, rr_cb_store, rr_cb_peek, rr_cb_clk, rr_cb_now, rr_cb_bank, rr_cb_pending,
-    rr_cb_clk_read, rr_cb_set_last_opcode
+    rr_cb_clk_read, rr_cb_set_last_opcode, rr_cb_alarms
 };
 
 static rr_dispatch_fn rr_dispatch = NULL;
 typedef void (*rr_shutdown_fn)(void);
 static rr_shutdown_fn rr_shutdown = NULL;
 static int rr_state = 0; /* 0 not tried, 1 active, -1 absent */
+
+/* SID taps for the interpreter's accesses (sid/sid.c). */
+extern int (*rr_sid_tap_read)(uint16_t addr, uint8_t value, uint64_t clk);
+extern int (*rr_sid_tap_write)(uint16_t addr, uint8_t value, uint64_t clk);
+extern int rr_in_dispatch;
+typedef int (*rr_io_fn)(uint16_t addr, uint8_t value, uint64_t clk);
 
 /* Called at machine shutdown: the DLL writes its final statistics and
    observations, so nothing is lost when a window is closed. */
@@ -835,12 +848,16 @@ static int rr_hook_enabled(void)
             if (module != NULL) {
                 rr_dispatch = (rr_dispatch_fn)(void *)GetProcAddress(module, "rr_dispatch");
                 rr_shutdown = (rr_shutdown_fn)(void *)GetProcAddress(module, "rr_shutdown");
+                rr_sid_tap_read = (rr_io_fn)(void *)GetProcAddress(module, "rr_io_read");
+                rr_sid_tap_write = (rr_io_fn)(void *)GetProcAddress(module, "rr_io_write");
             }
 #else
             void *module = dlopen(path, RTLD_NOW);
             if (module != NULL) {
                 rr_dispatch = (rr_dispatch_fn)dlsym(module, "rr_dispatch");
                 rr_shutdown = (rr_shutdown_fn)dlsym(module, "rr_shutdown");
+                rr_sid_tap_read = (rr_io_fn)dlsym(module, "rr_io_read");
+                rr_sid_tap_write = (rr_io_fn)dlsym(module, "rr_io_write");
             }
 #endif
             if (rr_dispatch != NULL) {
@@ -1128,7 +1145,11 @@ void maincpu_mainloop(void)
         rr_r.y = reg_y;                                                         \
         rr_r.sp = reg_sp;                                                       \
         rr_r.p = (uint8_t)LOCAL_STATUS();                                       \
-        if (rr_dispatch(&rr_r, &rr_callbacks) > 0) {                            \
+        int rr_ran;                                                             \
+        rr_in_dispatch = 1;                                                     \
+        rr_ran = rr_dispatch(&rr_r, &rr_callbacks);                             \
+        rr_in_dispatch = 0;                                                     \
+        if (rr_ran > 0) {                                                       \
             reg_a = rr_r.a;                                                     \
             reg_x = rr_r.x;                                                     \
             reg_y = rr_r.y;                                                     \

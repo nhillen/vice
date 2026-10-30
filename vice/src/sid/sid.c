@@ -325,7 +325,57 @@ static int sid_dump_chip(int chipno)
 
 /* ------------------------------------------------------------------------- */
 
+#ifdef RR_HOOK
+/* RetroRecomp: the SID accesses VICE's own CPU core makes are offered to the
+   port's modules (the DLL's rr_io_read and rr_io_write), so a module that
+   replaces the SID sees every access, not only the translated code's. The
+   pointers are set by the x64sc CPU (mainc64cpu.c) when the DLL exports
+   them; rr_in_dispatch is set while translated code runs, whose accesses
+   the DLL already sees, so nothing is offered twice. Read: the module
+   returns the value the CPU gets, or -1 to keep VICE's. Write: the value
+   the chip gets, -1 to keep it, or -2 to swallow the write. */
+int (*rr_sid_tap_read)(uint16_t addr, uint8_t value, uint64_t clk) = NULL;
+int (*rr_sid_tap_write)(uint16_t addr, uint8_t value, uint64_t clk) = NULL;
+int rr_in_dispatch = 0;
+
+static uint8_t sid_read_untapped(uint16_t addr);
+static void sid_store_untapped(uint16_t addr, uint8_t byte);
+
 uint8_t sid_read(uint16_t addr)
+{
+    uint8_t value = sid_read_untapped(addr);
+    if (rr_sid_tap_read != NULL && !rr_in_dispatch) {
+        /* The I/O layer passes the address masked to the chip; the taps see
+           the register at its C64 address. */
+        int r = rr_sid_tap_read((uint16_t)(0xd400 | (addr & 0x1f)), value, (uint64_t)maincpu_clk);
+        if (r >= 0) {
+            value = (uint8_t)r;
+        }
+    }
+    return value;
+}
+
+void sid_store(uint16_t addr, uint8_t byte)
+{
+    if (rr_sid_tap_write != NULL && !rr_in_dispatch) {
+        int r = rr_sid_tap_write((uint16_t)(0xd400 | (addr & 0x1f)), byte, (uint64_t)maincpu_clk);
+        if (r == -2) {
+            /* Swallowed: the chip does not get it, but the bus cycle's
+               alarm handling still happens, as in sid_store_chip. */
+            machine_handle_pending_alarms(maincpu_rmw_flag + 1);
+            return;
+        }
+        if (r >= 0) {
+            byte = (uint8_t)r;
+        }
+    }
+    sid_store_untapped(addr, byte);
+}
+
+static uint8_t sid_read_untapped(uint16_t addr)
+#else
+uint8_t sid_read(uint16_t addr)
+#endif
 {
     if (sid_stereo >= 1
         && addr >= sid2_address_start
@@ -446,7 +496,11 @@ SIDx_PEEK(6)
 SIDx_PEEK(7)
 SIDx_PEEK(8)
 
+#ifdef RR_HOOK
+static void sid_store_untapped(uint16_t addr, uint8_t byte)
+#else
 void sid_store(uint16_t addr, uint8_t byte)
+#endif
 {
     if (sid_stereo >= 1
         && addr >= sid2_address_start
