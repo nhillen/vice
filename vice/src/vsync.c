@@ -661,6 +661,13 @@ bool vsync_should_skip_frame(struct video_canvas_s *canvas)
 }
 
 /* This is called at the end of each screen frame. */
+#ifdef RR_HOOK
+/* RetroRecomp: called at the end of every frame when set. The engine
+   library (rrlib/vc_api.c) parks the emulation here until its host asks
+   for the next frame; the executables leave it NULL. */
+void (*rr_vsync_gate)(void) = NULL;
+#endif
+
 void vsync_do_vsync(struct video_canvas_s *c)
 {
     static tick_t last_vsync;
@@ -713,4 +720,10 @@ void vsync_do_vsync(struct video_canvas_s *c)
     kbdbuf_flush();
 
     last_vsync = now;
+
+#ifdef RR_HOOK
+    if (rr_vsync_gate != NULL) {
+        rr_vsync_gate();
+    }
+#endif
 }
