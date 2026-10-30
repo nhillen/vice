@@ -12,6 +12,11 @@
  *                        monitor's DISPLAY_GET gives it;
  *   vc_joystick(...)     a joystick port's bits;
  *   vc_key(...)          a key of the keyboard matrix;
+ *   vc_request_*(...)    reset, save or load a snapshot, warp: queued, and
+ *                        done on the emulation thread through a CPU trap at
+ *                        the next instruction boundary, as VICE's own UI
+ *                        does them. Safe to call from any thread, while the
+ *                        machine runs or while it is parked;
  *   vc_setenv(...)       set a variable in the C runtime's environment,
  *                        which getenv reads (a host's SetEnvironmentVariable
  *                        after startup does not reach it). VICE's hook code
@@ -36,6 +41,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "interrupt.h"
 #include "joyport/joystick.h"
 #include "keyboard.h"
 #include "lib.h"
@@ -43,6 +49,7 @@
 #include "machine.h"
 #include "main.h"
 #include "screenshot.h"
+#include "vsync.h"
 
 #define VC_EXPORT __declspec(dllexport)
 
@@ -55,9 +62,81 @@ static volatile int vc_failed = 0;
 static int vc_argc = 0;
 static char **vc_argv = NULL;
 
+/* Requests from the host or the port's menu, done on the emulation thread. */
+enum vc_request_kind { VC_NONE, VC_RESET, VC_POWER_CYCLE, VC_SAVE, VC_LOAD, VC_WARP_ON, VC_WARP_OFF };
+
+static pthread_mutex_t vc_lock = PTHREAD_MUTEX_INITIALIZER;
+static enum vc_request_kind vc_pending = VC_NONE;
+static char vc_pending_path[1024];
+static volatile int vc_last_result = 0;
+
+static void vc_snapshot_trap(uint16_t addr, void *data)
+{
+    enum vc_request_kind kind = (enum vc_request_kind)(intptr_t)data;
+    char path[sizeof vc_pending_path];
+
+    pthread_mutex_lock(&vc_lock);
+    memcpy(path, vc_pending_path, sizeof path);
+    pthread_mutex_unlock(&vc_lock);
+    if (kind == VC_SAVE) {
+        vc_last_result = machine_write_snapshot(path, 1, 0, 0);
+    } else {
+        vc_last_result = machine_read_snapshot(path, 0);
+    }
+}
+
+/* Take a queued request: snapshots become a CPU trap (run at the next
+   instruction boundary, registers in place), the rest happen here. */
+static void vc_service(void)
+{
+    enum vc_request_kind kind;
+
+    pthread_mutex_lock(&vc_lock);
+    kind = vc_pending;
+    vc_pending = VC_NONE;
+    pthread_mutex_unlock(&vc_lock);
+    switch (kind) {
+        case VC_RESET:
+            machine_trigger_reset(MACHINE_RESET_MODE_RESET_CPU);
+            break;
+        case VC_POWER_CYCLE:
+            machine_trigger_reset(MACHINE_RESET_MODE_POWER_CYCLE);
+            break;
+        case VC_SAVE:
+        case VC_LOAD:
+            interrupt_maincpu_trigger_trap(vc_snapshot_trap, (void *)(intptr_t)kind);
+            break;
+        case VC_WARP_ON:
+            vsync_set_warp_mode(1);
+            break;
+        case VC_WARP_OFF:
+            vsync_set_warp_mode(0);
+            break;
+        case VC_NONE:
+            break;
+    }
+}
+
+static int vc_request(enum vc_request_kind kind, const char *path)
+{
+    pthread_mutex_lock(&vc_lock);
+    if (vc_pending != VC_NONE) {
+        pthread_mutex_unlock(&vc_lock);
+        return -1; /* one at a time */
+    }
+    vc_pending = kind;
+    if (path != NULL) {
+        strncpy(vc_pending_path, path, sizeof vc_pending_path - 1);
+        vc_pending_path[sizeof vc_pending_path - 1] = 0;
+    }
+    pthread_mutex_unlock(&vc_lock);
+    return 0;
+}
+
 /* On the emulation thread, at the end of every frame. */
 static void vc_gate(void)
 {
+    vc_service();
     vc_frames++;
     sem_post(&vc_frame_done);
     sem_wait(&vc_go);
@@ -185,4 +264,34 @@ VC_EXPORT void vc_key(int row, int col, int down)
 VC_EXPORT int vc_setenv(const char *name, const char *value)
 {
     return _putenv_s(name, value);
+}
+
+/* Reset: 0 the CPU (the reset button), 1 a power cycle. */
+VC_EXPORT int vc_request_reset(int power_cycle)
+{
+    return vc_request(power_cycle ? VC_POWER_CYCLE : VC_RESET, NULL);
+}
+
+/* Save a snapshot (with ROMs, without disks) at the next boundary. */
+VC_EXPORT int vc_request_save(const char *path)
+{
+    return vc_request(VC_SAVE, path);
+}
+
+/* Load a snapshot at the next boundary. */
+VC_EXPORT int vc_request_load(const char *path)
+{
+    return vc_request(VC_LOAD, path);
+}
+
+/* Warp: run as fast as the host can (VICE's own pacing off). */
+VC_EXPORT int vc_request_warp(int on)
+{
+    return vc_request(on ? VC_WARP_ON : VC_WARP_OFF, NULL);
+}
+
+/* The result of the last snapshot save or load: 0 on success. */
+VC_EXPORT int vc_last_snapshot_result(void)
+{
+    return vc_last_result;
 }
