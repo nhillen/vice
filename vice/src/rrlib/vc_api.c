@@ -41,6 +41,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "archdep_exit.h"
 #include "interrupt.h"
 #include "joyport/joystick.h"
 #include "keyboard.h"
@@ -63,12 +64,16 @@ static int vc_argc = 0;
 static char **vc_argv = NULL;
 
 /* Requests from the host or the port's menu, done on the emulation thread. */
-enum vc_request_kind { VC_NONE, VC_RESET, VC_POWER_CYCLE, VC_SAVE, VC_LOAD, VC_WARP_ON, VC_WARP_OFF };
+enum vc_request_kind { VC_NONE, VC_RESET, VC_POWER_CYCLE, VC_SAVE, VC_LOAD, VC_WARP_ON, VC_WARP_OFF, VC_QUIT };
 
 static pthread_mutex_t vc_lock = PTHREAD_MUTEX_INITIALIZER;
 static enum vc_request_kind vc_pending = VC_NONE;
 static char vc_pending_path[1024];
 static volatile int vc_last_result = 0;
+/* Snapshots loaded so far, and the last one's file: modules that keep
+   state of their own (the port's SID model) restore it from there. */
+static volatile long vc_loads = 0;
+static char vc_loaded_path[sizeof vc_pending_path];
 
 static void vc_snapshot_trap(uint16_t addr, void *data)
 {
@@ -82,6 +87,12 @@ static void vc_snapshot_trap(uint16_t addr, void *data)
         vc_last_result = machine_write_snapshot(path, 1, 0, 0);
     } else {
         vc_last_result = machine_read_snapshot(path, 0);
+        if (vc_last_result == 0) {
+            pthread_mutex_lock(&vc_lock);
+            memcpy(vc_loaded_path, path, sizeof vc_loaded_path);
+            pthread_mutex_unlock(&vc_lock);
+            vc_loads++;
+        }
     }
 }
 
@@ -111,6 +122,11 @@ static void vc_service(void)
             break;
         case VC_WARP_OFF:
             vsync_set_warp_mode(0);
+            break;
+        case VC_QUIT:
+            /* VICE's own exit: machine shutdown, which lets the game DLL's
+               modules and statistics write their files. */
+            archdep_vice_exit(0);
             break;
         case VC_NONE:
             break;
@@ -294,4 +310,23 @@ VC_EXPORT int vc_request_warp(int on)
 VC_EXPORT int vc_last_snapshot_result(void)
 {
     return vc_last_result;
+}
+
+/* Snapshots loaded so far through vc_request_load; the last one's path in
+   `buf` (capacity `cap`). */
+VC_EXPORT long vc_loaded(char *buf, int cap)
+{
+    pthread_mutex_lock(&vc_lock);
+    if (buf != NULL && cap > 0) {
+        strncpy(buf, vc_loaded_path, (size_t)cap - 1);
+        buf[cap - 1] = 0;
+    }
+    pthread_mutex_unlock(&vc_lock);
+    return vc_loads;
+}
+
+/* End the process through VICE's own exit at the end of the next frame. */
+VC_EXPORT int vc_request_quit(void)
+{
+    return vc_request(VC_QUIT, NULL);
 }
