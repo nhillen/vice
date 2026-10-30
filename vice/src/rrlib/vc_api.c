@@ -55,6 +55,7 @@
 #define VC_EXPORT __declspec(dllexport)
 
 extern void (*rr_vsync_gate)(void);
+extern void rr_keyboard_set_keyarr_recorded(int row, int col, int value);
 
 static sem_t vc_frame_done;
 static sem_t vc_go;
@@ -273,16 +274,20 @@ VC_EXPORT long vc_frame(uint8_t *buf, long cap, uint16_t *info)
     return need;
 }
 
-/* A joystick port's bits, 1 = pressed: up, down, left, right, fire. */
+/* A joystick port's bits, 1 = pressed: up, down, left, right, fire.
+   `port` is VICE's index: 0 for control port 1, 1 for port 2. Recorded
+   when an event recording runs. Call on the emulation thread (a module's
+   boundary) or while it is parked. */
 VC_EXPORT void vc_joystick(unsigned int port, uint16_t bits)
 {
     joystick_set_value_absolute(port, bits);
 }
 
-/* A key of the matrix, as VICE's keyarr[row] bit col. */
+/* A key of the matrix, as VICE's keyarr[row] bit col; recorded when an
+   event recording runs. Same thread rule as vc_joystick. */
 VC_EXPORT void vc_key(int row, int col, int down)
 {
-    keyboard_set_keyarr(row, col, down);
+    rr_keyboard_set_keyarr_recorded(row, col, down);
 }
 
 /* Set an environment variable as the C runtime sees it. */
