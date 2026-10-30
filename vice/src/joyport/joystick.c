@@ -390,10 +390,35 @@ static int get_joystick_autofire(int index)
     return 1;
 }
 
+#ifdef RR_HOOK
+/* RetroRecomp input recording: while a recording is active the game reads
+   the host joystick as it was at the last recorded instruction boundary
+   (rr_joystick_latch), so a replay that applies the same values at the
+   same boundaries reproduces the recorded run exactly. */
+int rr_joystick_latch_active = 0;
+static uint16_t rr_joystick_latched[JOYPORT_MAX_PORTS] = { 0 };
+
+void rr_joystick_latch(void)
+{
+    memcpy(rr_joystick_latched, joystick_value, sizeof(rr_joystick_latched));
+}
+
+uint16_t rr_joystick_latched_value(int index)
+{
+    return rr_joystick_latched[index];
+}
+#endif
+
 uint16_t get_joystick_value(int index)
 {
-    uint16_t retval = joystick_value[index] & 0xffef;
-    int fire_button = JOYPORT_BIT_BOOL(joystick_value[index], JOYPORT_FIRE_BIT);
+    uint16_t live = joystick_value[index];
+#ifdef RR_HOOK
+    if (rr_joystick_latch_active) {
+        live = rr_joystick_latched[index];
+    }
+#endif
+    uint16_t retval = live & 0xffef;
+    int fire_button = JOYPORT_BIT_BOOL(live, JOYPORT_FIRE_BIT);
 
     /* check if autofire is enabled */
     if (joystick_autofire_enable[index]) {

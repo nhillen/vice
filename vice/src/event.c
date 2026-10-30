@@ -804,6 +804,21 @@ int event_record_stop(void)
     return 0;
 }
 
+#ifdef RR_HOOK
+/* RetroRecomp: end a recording now, without a CPU trap, so that a
+   recording still open when the emulator shuts down is written out
+   (end.vsf carries the event list). */
+void rr_event_record_flush(void)
+{
+    if (record_active == 0) {
+        return;
+    }
+    event_record(EVENT_LIST_END, NULL, 0);
+    alarm_unset(event_alarm);
+    event_record_stop_trap(0, NULL);
+}
+#endif
+
 /*-----------------------------------------------------------------------*/
 
 static unsigned int playback_reset_ack = 0;

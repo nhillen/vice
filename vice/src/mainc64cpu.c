@@ -48,6 +48,11 @@
 #include "maincpu.h"
 #include "mainlock.h"
 #include "mem.h"
+#include "keyboard.h"
+#include "joystick.h"
+#include "autostart.h"
+#include "vice-event.h"
+#include <string.h>
 #include "monitor.h"
 #include "mos6510.h"
 #include "reu.h"
@@ -836,6 +841,187 @@ static int rr_hook_enabled(void)
     return rr_state == 1;
 }
 
+/* Input recording and scripted keys, for scenarios
+   (docs/game-deliverable.md, stage 5).
+
+   RR_INPUT_AT=hex address: the recording boundary, normally the game's
+   interrupt entry, which the interpreter always passes. At every execution
+   of it ("hit"):
+   - RR_KEYS="hit:row:col:down,..." sets keyboard matrix entries scheduled
+     for this hit (keyboard_set_keyarr), so a headless run can press keys
+     the binary monitor cannot;
+   - RR_JOY="hit:port:value,..." sets a joystick port's host value (bits
+     0-4 up down left right fire, 1 = pressed) at that hit, as if a person
+     had moved the stick; it is logged like real input;
+   - RR_EVENT_RECORD=1 starts VICE's own event recording (start.vsf, and
+     end.vsf with the event list, in EventSnapshotDir) at the first hit
+     after autostart has finished, and the log notes that hit. The
+     recording replays on any build with -playback, keyboard included.
+   - RR_INPUT_LATCH=1 makes the game read the host joystick as it was at
+     the last hit (not for event recordings, which replay host changes at
+     their own cycles).
+   - RR_INPUT_LOG=path latches the host joystick values the game will see
+     until the next hit and appends one line: hit, joystick port 1 and 2
+     (5 bits, 1 = pressed), the 8 keyboard matrix rows, and the FNV-1a
+     hash of all 64 KB of RAM, so a replay can prove it is the same run. */
+#define RR_KEYS_MAX 256
+
+static int rr_input_state = 0; /* 0 untried, 1 active, -1 off */
+static unsigned rr_input_at = 0;
+static unsigned long rr_input_hits = 0;
+static FILE *rr_input_log = NULL;
+static struct { unsigned long hit; int row, col, down; } rr_keys[RR_KEYS_MAX];
+static int rr_keys_n = 0;
+static struct { unsigned long hit; int port, value; } rr_joy[RR_KEYS_MAX];
+static int rr_joy_n = 0;
+static int rr_event_record = 0; /* 0 off, 1 wanted, 2 started */
+
+extern void rr_keyboard_set_keyarr_recorded(int row, int col, int value);
+
+extern int rr_joystick_latch_active;
+extern void rr_joystick_latch(void);
+extern uint16_t rr_joystick_latched_value(int index);
+
+static void rr_input_init(void)
+{
+    const char *at = getenv("RR_INPUT_AT");
+    const char *path = getenv("RR_INPUT_LOG");
+    const char *keys = getenv("RR_KEYS");
+    const char *joy = getenv("RR_JOY");
+    rr_input_state = -1;
+    if (at == NULL || *at == 0) {
+        return;
+    }
+    rr_input_at = (unsigned)strtoul(at, NULL, 16) & 0xFFFF;
+    if (path != NULL && *path != 0) {
+        rr_input_log = fopen(path, "w");
+        if (rr_input_log != NULL) {
+            fprintf(rr_input_log, "# hit joy1 joy2 keyrows ram-fnv1a64, at $%04X\n", rr_input_at);
+            rr_joystick_latch_active = getenv("RR_INPUT_LATCH") != NULL;
+            rr_joystick_latch();
+            rr_input_state = 1;
+            log_message(maincpu_log, "RetroRecomp: recording input at $%04X to %s", rr_input_at, path);
+        } else {
+            log_error(maincpu_log, "RetroRecomp: cannot open RR_INPUT_LOG %s", path);
+        }
+    }
+    if (keys != NULL && *keys != 0) {
+        const char *k = keys;
+        while (*k != 0 && rr_keys_n < RR_KEYS_MAX) {
+            char *end = NULL;
+            unsigned long hit = strtoul(k, &end, 10);
+            int row, col, down;
+            if (end == NULL || *end != ':') {
+                break;
+            }
+            row = (int)strtol(end + 1, &end, 10);
+            if (*end != ':') {
+                break;
+            }
+            col = (int)strtol(end + 1, &end, 10);
+            if (*end != ':') {
+                break;
+            }
+            down = (int)strtol(end + 1, &end, 10);
+            rr_keys[rr_keys_n].hit = hit;
+            rr_keys[rr_keys_n].row = row;
+            rr_keys[rr_keys_n].col = col;
+            rr_keys[rr_keys_n].down = down;
+            rr_keys_n++;
+            if (*end == ',') {
+                end++;
+            }
+            k = end;
+        }
+        if (rr_keys_n > 0) {
+            rr_input_state = 1;
+            log_message(maincpu_log, "RetroRecomp: %d scripted key events at $%04X", rr_keys_n, rr_input_at);
+        }
+    }
+    if (getenv("RR_EVENT_RECORD") != NULL) {
+        rr_event_record = 1;
+        rr_input_state = 1;
+    }
+    if (joy != NULL && *joy != 0) {
+        const char *k = joy;
+        while (*k != 0 && rr_joy_n < RR_KEYS_MAX) {
+            char *end = NULL;
+            unsigned long hit = strtoul(k, &end, 10);
+            int port, value;
+            if (end == NULL || *end != ':') {
+                break;
+            }
+            port = (int)strtol(end + 1, &end, 10);
+            if (*end != ':') {
+                break;
+            }
+            value = (int)strtol(end + 1, &end, 10);
+            rr_joy[rr_joy_n].hit = hit;
+            rr_joy[rr_joy_n].port = port;
+            rr_joy[rr_joy_n].value = value;
+            rr_joy_n++;
+            if (*end == ',') {
+                end++;
+            }
+            k = end;
+        }
+        if (rr_joy_n > 0) {
+            rr_input_state = 1;
+            log_message(maincpu_log, "RetroRecomp: %d scripted joystick events at $%04X", rr_joy_n, rr_input_at);
+        }
+    }
+}
+
+static void rr_input_hit(void)
+{
+    unsigned long h = rr_input_hits++;
+    int i;
+    if (rr_event_record == 1 && !autostart_in_progress()) {
+        if (event_record_start() == 0) {
+            rr_event_record = 2;
+            if (rr_input_log != NULL) {
+                fprintf(rr_input_log, "# event recording requested at hit %lu\n", h);
+            }
+            log_message(maincpu_log, "RetroRecomp: event recording requested at hit %lu", h);
+        }
+    }
+    for (i = 0; i < rr_keys_n; i++) {
+        if (rr_keys[i].hit == h) {
+            rr_keyboard_set_keyarr_recorded(rr_keys[i].row, rr_keys[i].col, rr_keys[i].down);
+        }
+    }
+    for (i = 0; i < rr_joy_n; i++) {
+        if (rr_joy[i].hit == h) {
+            joystick_set_value_absolute((unsigned int)rr_joy[i].port, (uint16_t)rr_joy[i].value);
+        }
+    }
+    if (rr_input_log != NULL) {
+        uint64_t hash = 0xcbf29ce484222325ULL;
+        unsigned k;
+        rr_joystick_latch();
+        for (k = 0; k < 0x10000; k++) {
+            hash ^= mem_ram[k];
+            hash *= 0x100000001b3ULL;
+        }
+        fprintf(rr_input_log, "%lu %02x %02x %02x%02x%02x%02x%02x%02x%02x%02x %016llx\n",
+                h,
+                rr_joystick_latched_value(0) & 0x1f,
+                rr_joystick_latched_value(1) & 0x1f,
+                keyarr[0] & 0xff, keyarr[1] & 0xff, keyarr[2] & 0xff, keyarr[3] & 0xff,
+                keyarr[4] & 0xff, keyarr[5] & 0xff, keyarr[6] & 0xff, keyarr[7] & 0xff,
+                (unsigned long long)hash);
+        fflush(rr_input_log);
+    }
+}
+
+#define RR_INPUT_HOOK()                                                 \
+    if (rr_input_state == 0) {                                          \
+        rr_input_init();                                                \
+    }                                                                   \
+    if (rr_input_state == 1 && (unsigned)reg_pc == rr_input_at) {       \
+        rr_input_hit();                                                 \
+    }
+
 #endif /* RR_HOOK */
 
 void maincpu_mainloop(void)
@@ -918,6 +1104,7 @@ void maincpu_mainloop(void)
 
 #ifdef RR_HOOK
 #define DISPATCH_HOOK()                                                         \
+    RR_INPUT_HOOK()                                                             \
     if (rr_hook_enabled() && !CPU_IS_JAMMED                                     \
         && !rr_must_interpret(CPU_INT_STATUS->global_pending_int & ~IK_MONITOR, \
                               LOCAL_INTERRUPT())) {                             \

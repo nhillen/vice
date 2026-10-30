@@ -376,6 +376,16 @@ void keyboard_set_keyarr(int row, int col, int value)
     /* FIXME: perhaps trigger alarm here? */
 }
 
+#ifdef RR_HOOK
+/* RetroRecomp: a scripted matrix change that is also recorded as an
+   event, so a scripted run replays through event playback. */
+void rr_keyboard_set_keyarr_recorded(int row, int col, int value)
+{
+    keyboard_set_keyarr(row, col, value);
+    keyboard_event_record();
+}
+#endif
+
 /*-----------------------------------------------------------------------*/
 
 static void clear_modifier_flags(void)

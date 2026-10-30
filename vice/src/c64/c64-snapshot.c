@@ -118,6 +118,27 @@ int c64_snapshot_read(const char *name, int event_mode)
 
     joyport_clear_devices();
 
+#ifdef RR_HOOK
+    /* RetroRecomp: name the module that fails, for diagnosing a load. */
+#define RR_SNAP(x) if ((x) < 0) { log_error(LOG_DEFAULT, "RetroRecomp: snapshot read failed in %s", #x); goto fail; }
+    RR_SNAP(maincpu_snapshot_read_module(s));
+    RR_SNAP(c64_snapshot_read_module(s));
+    RR_SNAP(ciacore_snapshot_read_module(machine_context.cia1, s));
+    RR_SNAP(ciacore_snapshot_read_module(machine_context.cia2, s));
+    RR_SNAP(sid_snapshot_read_module(s));
+    RR_SNAP(drive_snapshot_read_module(s));
+    RR_SNAP(fsdrive_snapshot_read_module(s));
+    RR_SNAP(vicii_snapshot_read_module(s));
+    RR_SNAP(c64_glue_snapshot_read_module(s));
+    RR_SNAP(event_snapshot_read_module(s, event_mode));
+    RR_SNAP(memhacks_snapshot_read_modules(s));
+    RR_SNAP(tapeport_snapshot_read_module(s));
+    RR_SNAP(keyboard_snapshot_read_module(s));
+    RR_SNAP(joyport_snapshot_read_module(s, JOYPORT_1));
+    RR_SNAP(joyport_snapshot_read_module(s, JOYPORT_2));
+    RR_SNAP(userport_snapshot_read_module(s));
+#undef RR_SNAP
+#else
     if (maincpu_snapshot_read_module(s) < 0
         || c64_snapshot_read_module(s) < 0
         || ciacore_snapshot_read_module(machine_context.cia1, s) < 0
@@ -136,6 +157,7 @@ int c64_snapshot_read(const char *name, int event_mode)
         || userport_snapshot_read_module(s) < 0) {
         goto fail;
     }
+#endif
 
     snapshot_close(s);
 
