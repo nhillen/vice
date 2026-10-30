@@ -372,6 +372,80 @@ VICE_SDL_JoystickID joy_ordinal_to_id(int ordinal)
 
 
 
+#ifdef RR_HOOK
+/* RetroRecomp: a working rescan. Upstream's body is compiled out, so a
+   controller that was off at start-up (a Bluetooth pad asleep) could
+   never appear during a session, although the menu's "Rescan host
+   joysticks" and SDL's device-added event both call this. Register every
+   SDL joystick not yet known, and when RR_JOY_AUTOPORT names a port (1
+   or 2) whose device is none, or a host joystick that is no longer
+   attached, give it the first newly found one. */
+int sdljoy_rescan(void)
+{
+    int njoys = SDL_NumJoysticks();
+    int num;
+    int added_index = -1;
+    const char *auto_port;
+
+    for (num = 0; num < njoys; num++) {
+        VICE_SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(num);
+        int i;
+        int known = 0;
+        SDL_Joystick *sdldev;
+        joystick_device_t *joydev;
+
+        for (i = 0; i < joystick_device_count(); i++) {
+            joystick_device_t *d = joystick_device_by_index(i);
+            if (d != NULL && d->priv != NULL && ((joy_priv_t *)d->priv)->id == id) {
+                known = 1;
+                break;
+            }
+        }
+        if (known) {
+            continue;
+        }
+        sdldev = SDL_JoystickOpen(num);
+        if (sdldev == NULL) {
+            log_warning(sdljoy_log, "rescan: failed to open device %d: %s", num, SDL_GetError());
+            continue;
+        }
+        joydev = scan_device(sdldev, num);
+        if (joydev != NULL) {
+            joystick_device_register(joydev);
+            log_message(sdljoy_log, "RetroRecomp: registered \"%s\" after start-up", joydev->name);
+            if (added_index < 0) {
+                added_index = joystick_device_count() - 1;
+            }
+        }
+    }
+
+    auto_port = getenv("RR_JOY_AUTOPORT");
+    if (added_index >= 0 && auto_port != NULL) {
+        int port = atoi(auto_port);
+        if (port == 1 || port == 2) {
+            char res[16];
+            int cur = 0;
+            int free_port = 0;
+            snprintf(res, sizeof res, "JoyDevice%d", port);
+            resources_get_int(res, &cur);
+            if (cur == 0) {
+                free_port = 1;
+            } else if (cur >= JOYDEV_REALJOYSTICK_MIN) {
+                joystick_device_t *d = joystick_device_by_index(cur - JOYDEV_REALJOYSTICK_MIN);
+                if (d == NULL || d->priv == NULL
+                        || !SDL_JoystickGetAttached(((joy_priv_t *)d->priv)->sdldev)) {
+                    free_port = 1;
+                }
+            }
+            if (free_port) {
+                resources_set_int(res, JOYDEV_REALJOYSTICK_MIN + added_index);
+                log_message(sdljoy_log, "RetroRecomp: joystick port %d now uses host joystick %d", port, added_index);
+            }
+        }
+    }
+    return 0;
+}
+#else
 int sdljoy_rescan(void)
 {
 #if 0
@@ -427,6 +501,7 @@ int sdljoy_rescan(void)
 #endif
     return 0;
 }
+#endif
 
 
 /* ------------------------------------------------------------------------- */
