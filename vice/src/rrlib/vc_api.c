@@ -73,6 +73,10 @@ static volatile int vc_last_result = 0;
 /* Snapshots loaded so far, and the last one's file: modules that keep
    state of their own (the port's SID model) restore it from there. */
 static volatile long vc_loads = 0;
+/* The host paces (VICE in warp, never sleeping); fast forward is then the
+   host not waiting, which it asks vc_fast_forward about. */
+static volatile int vc_host_pacing = 0;
+static volatile int vc_ff = 0;
 static char vc_loaded_path[sizeof vc_pending_path];
 
 static void vc_snapshot_trap(uint16_t addr, void *data)
@@ -118,10 +122,12 @@ static void vc_service(void)
             interrupt_maincpu_trigger_trap(vc_snapshot_trap, (void *)(intptr_t)kind);
             break;
         case VC_WARP_ON:
+            vc_ff = 1;
             vsync_set_warp_mode(1);
             break;
         case VC_WARP_OFF:
-            vsync_set_warp_mode(0);
+            vc_ff = 0;
+            vsync_set_warp_mode(vc_host_pacing);
             break;
         case VC_QUIT:
             /* VICE's own exit: machine shutdown, which lets the game DLL's
@@ -152,6 +158,9 @@ static int vc_request(enum vc_request_kind kind, const char *path)
 /* On the emulation thread, at the end of every frame. */
 static void vc_gate(void)
 {
+    if (vc_host_pacing && !vsync_get_warp_mode()) {
+        vsync_set_warp_mode(1);
+    }
     vc_service();
     vc_frames++;
     sem_post(&vc_frame_done);
@@ -329,4 +338,18 @@ VC_EXPORT long vc_loaded(char *buf, int cap)
 VC_EXPORT int vc_request_quit(void)
 {
     return vc_request(VC_QUIT, NULL);
+}
+
+/* The host paces from now on: VICE in warp, never sleeping. Call before
+   vc_init. */
+VC_EXPORT void vc_set_host_pacing(int on)
+{
+    vc_host_pacing = on;
+}
+
+/* Whether fast forward is on (the port's menu): a pacing host stops
+   waiting between frames. */
+VC_EXPORT int vc_fast_forward(void)
+{
+    return vc_ff;
 }
