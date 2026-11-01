@@ -75,9 +75,23 @@ void cia1_store(uint16_t addr, uint8_t data)
     ciacore_store(machine_context.cia1, addr, data);
 }
 
+/* RetroRecomp: the port reads (joysticks, keyboard) VICE's own CPU makes are
+   offered to the hook library like the SID's (sid/sid.c, which defines the
+   pointer): a recording of the game's input reads must include the ones the
+   interpreter makes, not only translated code's. */
+extern int (*rr_sid_tap_read)(uint16_t addr, uint8_t value, uint64_t clk);
+extern int rr_in_dispatch;
+
 uint8_t cia1_read(uint16_t addr)
 {
-    return ciacore_read(machine_context.cia1, addr);
+    uint8_t value = ciacore_read(machine_context.cia1, addr);
+    if (rr_sid_tap_read != NULL && !rr_in_dispatch && (addr & 0x0f) <= 1) {
+        int r = rr_sid_tap_read((uint16_t)(0xdc00 | (addr & 0x0f)), value, (uint64_t)maincpu_clk);
+        if (r >= 0) {
+            value = (uint8_t)r;
+        }
+    }
+    return value;
 }
 
 uint8_t cia1_peek(uint16_t addr)

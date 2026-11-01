@@ -820,6 +820,12 @@ static const rr_callbacks_t rr_callbacks = {
 static rr_dispatch_fn rr_dispatch = NULL;
 typedef void (*rr_shutdown_fn)(void);
 static rr_shutdown_fn rr_shutdown = NULL;
+/* Told before the interpreter runs an instruction itself at a boundary the
+   hook may not take (an interrupt, reset, trap or DMA pending): its memory
+   accesses go through the core, not the library, so a recording module
+   that counts accesses learns of them here. Optional export. */
+typedef void (*rr_interpreting_fn)(const rr_regs_t *regs, const rr_callbacks_t *cb);
+static rr_interpreting_fn rr_interpreting = NULL;
 static int rr_state = 0; /* 0 not tried, 1 active, -1 absent */
 
 /* SID taps for the interpreter's accesses (sid/sid.c). */
@@ -848,6 +854,7 @@ static int rr_hook_enabled(void)
             if (module != NULL) {
                 rr_dispatch = (rr_dispatch_fn)(void *)GetProcAddress(module, "rr_dispatch");
                 rr_shutdown = (rr_shutdown_fn)(void *)GetProcAddress(module, "rr_shutdown");
+                rr_interpreting = (rr_interpreting_fn)(void *)GetProcAddress(module, "rr_interpreting");
                 rr_sid_tap_read = (rr_io_fn)(void *)GetProcAddress(module, "rr_io_read");
                 rr_sid_tap_write = (rr_io_fn)(void *)GetProcAddress(module, "rr_io_write");
             }
@@ -856,6 +863,7 @@ static int rr_hook_enabled(void)
             if (module != NULL) {
                 rr_dispatch = (rr_dispatch_fn)dlsym(module, "rr_dispatch");
                 rr_shutdown = (rr_shutdown_fn)dlsym(module, "rr_shutdown");
+                rr_interpreting = (rr_interpreting_fn)dlsym(module, "rr_interpreting");
                 rr_sid_tap_read = (rr_io_fn)dlsym(module, "rr_io_read");
                 rr_sid_tap_write = (rr_io_fn)dlsym(module, "rr_io_write");
             }
@@ -1159,6 +1167,15 @@ void maincpu_mainloop(void)
             JUMP(rr_r.pc);                                                      \
             continue;                                                           \
         }                                                                       \
+    } else if (rr_interpreting != NULL && rr_state == 1 && !CPU_IS_JAMMED) {\
+        rr_regs_t rr_r;                                                     \
+        rr_r.pc = (uint16_t)reg_pc;                                         \
+        rr_r.a = reg_a;                                                     \
+        rr_r.x = reg_x;                                                     \
+        rr_r.y = reg_y;                                                     \
+        rr_r.sp = reg_sp;                                                   \
+        rr_r.p = (uint8_t)LOCAL_STATUS();                                   \
+        rr_interpreting(&rr_r, &rr_callbacks);                              \
     }
 #endif
 
